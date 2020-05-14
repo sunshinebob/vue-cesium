@@ -12,6 +12,55 @@ function cartesian3ToLonLat (cartesian3) {
   }
 }
 
+class GridLine {
+  constructor (viewer, positions, isBlow) {
+    if (viewer instanceof Cesium.Viewer === false) {
+      throw new Error('Viewer 不是一个标准的Cesium Viewer')
+    }
+    this.viewer = viewer
+    this.positions = positions
+    this.isBlow = isBlow
+    this.polyline = undefined
+    this.nodePoints = []
+    this.create()
+  }
+
+  create () {
+    let color = Cesium.Color.RED
+    if (!this.isBlow) {
+      color = Cesium.Color.YELLOW
+    }
+    this.polyline = this.viewer.entities.add({
+      name: 'gridLine',
+      polyline: {
+        positions: this.positions,
+        width: 1,
+        material: color,
+        depthFailMaterial: color
+      }
+    })
+    this.positions.forEach(position => {
+      const point = this.viewer.entities.add({
+        position,
+        point: {
+          pixelSize: 3,
+          color: Cesium.Color.YELLOW
+        }
+      })
+      this.nodePoints.push(point)
+    })
+  }
+
+  destroy () {
+  }
+
+  static defaultGridPolyline = {
+    width: 1,
+    material: Cesium.Color.WHITE,
+    depthFailMaterial: Cesium.Color.WHITE
+  }
+}
+
 // 1.创建闭合的线数据
 class CutFill {
   constructor (viewer, positions, polylineOption = {}, gridLineOption = {}) {
@@ -25,6 +74,8 @@ class CutFill {
     this.polylineOption = polylineOption // 选框折线参数
     this.gridLineOption = gridLineOption // 网格线参数
     this.viewer = viewer
+    this.sightline = new Cesium.Sightline(this.viewer.scene)
+    this.sightline.build()
     this.create()
   }
 
@@ -37,8 +88,8 @@ class CutFill {
    * 构建框选范围
    */
   drawScopePolyline () {
-    let options = Object.assign({}, CutFill.defaultScopePolyline, this.polylineOption)
-    let positions = this.positions.slice()
+    const options = Object.assign({}, CutFill.defaultScopePolyline, this.polylineOption)
+    const positions = this.positions.slice()
     options.positions = positions
     // 构建闭合的线, 复制第一个点
     positions.push(positions[0].clone())
@@ -61,10 +112,13 @@ class CutFill {
     for (let i = 0; i < 21; i++) {
       const longitude = minLon + i * lonStep
       const latitude = minLat + i * latStep
+      /* eslint-disable  */
       const verticalStarPos = new Cesium.Cartesian3.fromDegrees(longitude, minLat, baseHeight)
       const verticalEndPos = new Cesium.Cartesian3.fromDegrees(longitude, maxLat, baseHeight)
       const horizontalStartPos = new Cesium.Cartesian3.fromDegrees(minLon, latitude, baseHeight)
       const horizontalEndPos = new Cesium.Cartesian3.fromDegrees(maxLon, latitude, baseHeight)
+      /* eslint-enable  */
+
       const verticalLine = this.viewer.entities.add({
         name: 'verticalLine' + i,
         polyline: {
@@ -82,13 +136,12 @@ class CutFill {
       })
       this.grids.push(horizontalLine)
     }
+    console.log(baseHeight)
 
-    let gridLat = minLat + (latStep / 2)
-    let gridLon = minLon + (lonStep / 2)
     for (let m = 0; m < 20; m++) {
-      gridLat += latStep
+      const gridLat = (minLat + (latStep / 2)) + m * latStep
       for (let n = 0; n < 20; n++) {
-        gridLon += lonStep
+        const gridLon = (minLon + (lonStep / 2)) + n * lonStep
         const point = {
           longitude: gridLon,
           latitude: gridLat,
@@ -97,42 +150,46 @@ class CutFill {
         this.gridSet.push(point)
       }
     }
-    this.gridSet.slice(0, 1).forEach(async (gridPos, index) => {
+    this.gridSet.slice(380, 390).forEach(async (gridPos, index) => {
       console.log(gridPos)
       const sightline = new Cesium.Sightline(this.viewer.scene)
       sightline.build()
-      const name = 'point'
-      const flag = sightline.addTargetPoint({
-        position : [gridPos.longitude, gridPos.latitude, gridPos.height],
+      const name = 'point' + index
+      sightline.addTargetPoint({
+        position: [gridPos.longitude, gridPos.latitude, gridPos.height],
         name
       })
-      console.log(flag)
       sightline.viewPosition = [gridPos.longitude, gridPos.latitude, 0]
-      const res = await this.getBarrierPoint(sightline, name, index + 1)
-      console.log(res)
-    })
-    console.log(this.gridSet)
-  }
-
-  drawDiffLine (slight, lonS) {
-
-  }
-
-  // 获取碰撞点
-  async getBarrierPoint (sightline, name, delta) {
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        sightline.getBarrierPoint(name, res => {
-          let height = 0
-          if (res.position && res.position.height > 0) {
-            height = res.position.height
-          }
-          console.log(res)
-          resolve(height)
-          // sightline.removeAllTargetPoint()
+      // 闭包解决获取高度计算值不变问题
+      const getBarrierHeight = function (name, sightlineCp) {
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            sightlineCp.getBarrierPoint(name, res => {
+              sightlineCp.removeAllTargetPoint()
+              sightlineCp.destroy()
+              let height = 0
+              if (res.position && res.position.height > 0) {
+                height = res.position.height
+              }
+              console.log(height)
+              resolve(height)
+            })
+          }, 50)
         })
-      }, 100)
+      }
+      const barrierHeight = await getBarrierHeight(name, sightline)
+      // 是否低于基准高度
+      if (barrierHeight !== baseHeight) {
+        const isBlow = barrierHeight < baseHeight
+        const startPos = new Cesium.Cartesian3.fromDegrees(gridPos.longitude, gridPos.latitude, barrierHeight)
+        const endPos = new Cesium.Cartesian3.fromDegrees(gridPos.longitude, gridPos.latitude, baseHeight)
+        this._drawDiffLine([startPos, endPos], isBlow)
+      }
     })
+  }
+
+  _drawDiffLine (positions, isBlow = false) {
+    const res = new GridLine(this.viewer, positions, isBlow)
   }
 
   /**
